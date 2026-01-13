@@ -1,5 +1,14 @@
 require("dotenv").config();
 
+const OWNER_IDS = (process.env.OWNER_IDS || "")
+  .split(",")
+  .map(s => s.trim())
+  .filter(Boolean);
+
+function isOwnerUser(userId) {
+  return OWNER_IDS.includes(String(userId));
+}
+
 const express = require("express");
 const app = express();
 
@@ -99,12 +108,10 @@ const TICKET_TYPES = {
 const ONE_ACTIVE_TICKET_PER_TYPE = true; // paid-style guard (per user per type)
 
 // ===== Intents =====
-// For transcript with real message content, you also need MessageContent intent enabled in Dev Portal + code.
 const client = new Client({
   intents: [
     GatewayIntentBits.Guilds,
     GatewayIntentBits.GuildMessages,
-    // If you want transcript to include text content:
     // GatewayIntentBits.MessageContent,
   ],
 });
@@ -218,7 +225,6 @@ function buildTicketEmbed({ type, user, answers, claimedId }) {
 
   if (claimedId) embed.addFields({ name: "Claimed by", value: `<@${claimedId}>`, inline: true });
 
-  // show answers
   (answers || []).forEach((a) => {
     embed.addFields({ name: a.label, value: a.value?.slice(0, 1024) || "-", inline: false });
   });
@@ -250,7 +256,6 @@ async function createTicketChannel({ guild, user, type, answers }) {
   const staffRoleId = String(process.env.STAFF_ROLE_ID).trim();
   const logId = String(process.env.LOG_CHANNEL_ID).trim();
 
-  // paid-style guard: 1 active ticket per user per type
   if (ONE_ACTIVE_TICKET_PER_TYPE) {
     const exists = guild.channels.cache.find((c) => {
       if (c.type !== ChannelType.GuildText) return false;
@@ -275,7 +280,6 @@ async function createTicketChannel({ guild, user, type, answers }) {
     topic: setTopic({ ownerId: user.id, type }),
   });
 
-  // perms
   await channel.permissionOverwrites.set([
     { id: guild.roles.everyone.id, deny: [PermissionsBitField.Flags.ViewChannel] },
     {
@@ -322,7 +326,6 @@ async function createTicketChannel({ guild, user, type, answers }) {
 
 client.on("interactionCreate", async (interaction) => {
   try {
-    // ===== /ticket-diag =====
     if (interaction.isChatInputCommand() && interaction.commandName === "ticket-diag") {
       const guild = interaction.guild;
       if (!guild) return interaction.reply({ content: "This only works in a server.", flags: EPHEMERAL_FLAGS });
@@ -353,7 +356,6 @@ client.on("interactionCreate", async (interaction) => {
       return interaction.reply({ content: msg, flags: EPHEMERAL_FLAGS });
     }
 
-    // ===== /ticket-setup =====
     if (interaction.isChatInputCommand() && interaction.commandName === "ticket-setup") {
       const embed = new EmbedBuilder()
         .setTitle("🎫 Professional Ticket System")
@@ -378,7 +380,6 @@ client.on("interactionCreate", async (interaction) => {
       return interaction.reply({ embeds: [embed], components: [row] });
     }
 
-    // ===== Select Menu -> Modal =====
     if (interaction.isStringSelectMenu() && interaction.customId === "ticket_type") {
       const type = interaction.values[0];
       const cfg = TICKET_TYPES[type];
@@ -386,7 +387,6 @@ client.on("interactionCreate", async (interaction) => {
 
       const modal = new ModalBuilder().setCustomId(`ticket_modal_${type}`).setTitle(cfg.modalTitle);
 
-      // Discord modals: max 5 inputs
       const rows = cfg.questions.slice(0, 5).map((q) => {
         const style = q.style === "para" ? TextInputStyle.Paragraph : TextInputStyle.Short;
         return new ActionRowBuilder().addComponents(
@@ -404,7 +404,6 @@ client.on("interactionCreate", async (interaction) => {
       return interaction.showModal(modal);
     }
 
-    // ===== Modal Submit -> Create Ticket =====
     if (interaction.isModalSubmit() && interaction.customId.startsWith("ticket_modal_")) {
       const guild = interaction.guild;
       if (!guild) return interaction.reply({ content: "This only works in a server.", flags: EPHEMERAL_FLAGS });
@@ -433,7 +432,6 @@ client.on("interactionCreate", async (interaction) => {
       });
     }
 
-    // ===== Buttons (must be inside a ticket channel) =====
     if (interaction.isButton()) {
       const channel = interaction.channel;
       if (!channel || channel.type !== ChannelType.GuildText) {
@@ -448,9 +446,13 @@ client.on("interactionCreate", async (interaction) => {
 
       const staffRoleId = String(process.env.STAFF_ROLE_ID).trim();
       const isStaff = interaction.member?.roles?.cache?.has(staffRoleId);
-      const isOwner = interaction.user.id === ownerId;
 
-      // --- Claim / Unclaim (staff only) ---
+      // Ticket opener (paliekam kitoms funkcijoms)
+      const isTicketOwner = interaction.user.id === ownerId;
+
+      // Bot owner(s) iš OWNER_IDS (global permission)
+      const isBotOwner = isOwnerUser(interaction.user.id);
+
       if (interaction.customId === "ticket_claim_toggle") {
         if (!isStaff) return interaction.reply({ content: "Only staff can claim/unclaim.", flags: EPHEMERAL_FLAGS });
 
@@ -459,18 +461,14 @@ client.on("interactionCreate", async (interaction) => {
 
         await channel.setTopic(setTopic({ ownerId, type, claimedId: newClaim }));
 
-        // Update the first embed message if possible (last 50 messages search)
         const msgs = await channel.messages.fetch({ limit: 50 });
         const firstBotMsg = msgs.find((m) => m.author?.id === client.user.id && m.components?.length);
         if (firstBotMsg) {
-          const embeds = firstBotMsg.embeds?.length ? [EmbedBuilder.from(firstBotMsg.embeds[0])] : [];
-          if (embeds[0]) {
-            // rebuild is cleaner, but we'll just patch footer/claimed field quickly
-            // simplest: send a notice
-          }
-          await firstBotMsg.edit({
-            components: [ticketButtonsRow1({ claimedId: newClaim }), ticketButtonsRow2()],
-          }).catch(() => {});
+          await firstBotMsg
+            .edit({
+              components: [ticketButtonsRow1({ claimedId: newClaim }), ticketButtonsRow2()],
+            })
+            .catch(() => {});
         }
 
         return interaction.reply({
@@ -479,9 +477,8 @@ client.on("interactionCreate", async (interaction) => {
         });
       }
 
-      // --- Transcript (owner or staff) ---
       if (interaction.customId === "ticket_transcript") {
-        if (!isOwner && !isStaff) {
+        if (!isTicketOwner && !isStaff) {
           return interaction.reply({ content: "Only the ticket owner or staff can export transcript.", flags: EPHEMERAL_FLAGS });
         }
 
@@ -497,10 +494,11 @@ client.on("interactionCreate", async (interaction) => {
         const fileName = `transcript-${channel.name}.txt`;
         const attachment = new AttachmentBuilder(Buffer.from(transcriptText, "utf-8"), { name: fileName });
 
-        // send to logs always
         const logCh = interaction.guild.channels.cache.get(String(process.env.LOG_CHANNEL_ID).trim());
         if (logCh) {
-          await logCh.send({ content: `📄 Transcript exported: ${channel} (by <@${interaction.user.id}>)`, files: [attachment] }).catch(() => {});
+          await logCh
+            .send({ content: `📄 Transcript exported: ${channel} (by <@${interaction.user.id}>)`, files: [attachment] })
+            .catch(() => {});
         }
 
         return interaction.followUp({
@@ -510,9 +508,8 @@ client.on("interactionCreate", async (interaction) => {
         });
       }
 
-      // --- Add user (owner or staff) ---
       if (interaction.customId === "ticket_adduser") {
-        if (!isOwner && !isStaff) {
+        if (!isTicketOwner && !isStaff) {
           return interaction.reply({ content: "Only the ticket owner or staff can add users.", flags: EPHEMERAL_FLAGS });
         }
 
@@ -531,9 +528,8 @@ client.on("interactionCreate", async (interaction) => {
         return interaction.showModal(modal);
       }
 
-      // --- Rename (owner or staff) ---
       if (interaction.customId === "ticket_rename") {
-        if (!isOwner && !isStaff) {
+        if (!isTicketOwner && !isStaff) {
           return interaction.reply({ content: "Only the ticket owner or staff can rename.", flags: EPHEMERAL_FLAGS });
         }
 
@@ -553,10 +549,10 @@ client.on("interactionCreate", async (interaction) => {
         return interaction.showModal(modal);
       }
 
-      // --- Close (owner only) with confirm ---
+      // ✅ CLOSE: dabar gali tik OWNER_IDS (bot owneriai), ne ticket openeris
       if (interaction.customId === "ticket_close") {
-        if (!isOwner) {
-          return interaction.reply({ content: "❌ Only the ticket owner can close this ticket.", flags: EPHEMERAL_FLAGS });
+        if (!isBotOwner) {
+          return interaction.reply({ content: "❌ Only bot owner(s) can close this ticket.", flags: EPHEMERAL_FLAGS });
         }
 
         const row = new ActionRowBuilder().addComponents(
@@ -576,8 +572,8 @@ client.on("interactionCreate", async (interaction) => {
       }
 
       if (interaction.customId === "ticket_close_confirm") {
-        if (!isOwner) {
-          return interaction.reply({ content: "❌ Only the ticket owner can close this ticket.", flags: EPHEMERAL_FLAGS });
+        if (!isBotOwner) {
+          return interaction.reply({ content: "❌ Only bot owner(s) can close this ticket.", flags: EPHEMERAL_FLAGS });
         }
 
         await interaction.reply({ content: "🔒 Closing in 5 seconds… generating transcript & sending DM.", flags: EPHEMERAL_FLAGS });
@@ -592,7 +588,7 @@ client.on("interactionCreate", async (interaction) => {
         const fileName = `transcript-${channel.name}.txt`;
         const attachment = new AttachmentBuilder(Buffer.from(transcriptText, "utf-8"), { name: fileName });
 
-        // DM owner (best paid-tier feature)
+        // DM ticket opener (original ownerId iš topic)
         let dmOk = true;
         try {
           const u = await client.users.fetch(ownerId);
@@ -604,12 +600,11 @@ client.on("interactionCreate", async (interaction) => {
           dmOk = false;
         }
 
-        // log backup
         const logCh = interaction.guild.channels.cache.get(String(process.env.LOG_CHANNEL_ID).trim());
         if (logCh) {
           const note = dmOk
-            ? `🔒 Ticket closed by owner <@${ownerId}>. DM transcript ✅`
-            : `🔒 Ticket closed by owner <@${ownerId}>. DM transcript ❌ (DMs closed). Saved here ✅`;
+            ? `🔒 Ticket closed by bot owner <@${interaction.user.id}>. DM transcript ✅`
+            : `🔒 Ticket closed by bot owner <@${interaction.user.id}>. DM transcript ❌ (DMs closed). Saved here ✅`;
           await logCh.send({ content: note, files: [attachment] }).catch(() => {});
         }
 
@@ -618,7 +613,6 @@ client.on("interactionCreate", async (interaction) => {
       }
     }
 
-    // ===== Modals for add user / rename (run inside ticket channel) =====
     if (interaction.isModalSubmit() && interaction.customId === "ticket_adduser_modal") {
       const channel = interaction.channel;
       if (!channel || channel.type !== ChannelType.GuildText) {
@@ -628,9 +622,9 @@ client.on("interactionCreate", async (interaction) => {
       const ownerId = getOwnerIdFromTopic(channel.topic);
       const staffRoleId = String(process.env.STAFF_ROLE_ID).trim();
       const isStaff = interaction.member?.roles?.cache?.has(staffRoleId);
-      const isOwner = interaction.user.id === ownerId;
+      const isTicketOwner = interaction.user.id === ownerId;
 
-      if (!isOwner && !isStaff) {
+      if (!isTicketOwner && !isStaff) {
         return interaction.reply({ content: "Not allowed.", flags: EPHEMERAL_FLAGS });
       }
 
@@ -664,9 +658,9 @@ client.on("interactionCreate", async (interaction) => {
       const ownerId = getOwnerIdFromTopic(channel.topic);
       const staffRoleId = String(process.env.STAFF_ROLE_ID).trim();
       const isStaff = interaction.member?.roles?.cache?.has(staffRoleId);
-      const isOwner = interaction.user.id === ownerId;
+      const isTicketOwner = interaction.user.id === ownerId;
 
-      if (!isOwner && !isStaff) {
+      if (!isTicketOwner && !isStaff) {
         return interaction.reply({ content: "Not allowed.", flags: EPHEMERAL_FLAGS });
       }
 
