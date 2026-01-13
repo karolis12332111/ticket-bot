@@ -1,4 +1,21 @@
 require("dotenv").config();
+
+const express = require("express");
+const app = express();
+
+app.get("/", (req, res) => {
+  res.send("OK");
+});
+
+app.get("/health", (req, res) => {
+  res.send("HEALTHY");
+});
+
+const PORT = process.env.PORT || 3000;
+app.listen(PORT, () => {
+  console.log("Web serveris veikia ant porto " + PORT);
+});
+
 const {
   Client,
   GatewayIntentBits,
