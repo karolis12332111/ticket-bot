@@ -1,4 +1,10 @@
 require("dotenv").config();
+console.log("BOOT: index.js start");
+console.log("ENV DISCORD_TOKEN length:", process.env.DISCORD_TOKEN ? process.env.DISCORD_TOKEN.length : 0);
+console.log("ENV GUILD_ID:", process.env.GUILD_ID ? "OK" : "MISSING");
+console.log("ENV STAFF_ROLE_ID:", process.env.STAFF_ROLE_ID ? "OK" : "MISSING");
+console.log("ENV LOG_CHANNEL_ID:", process.env.LOG_CHANNEL_ID ? "OK" : "MISSING");
+
 
 // ===== BOT OWNERS (ONLY THESE CAN MANAGE TICKETS) =====
 const OWNER_IDS = (process.env.OWNER_IDS || "")
