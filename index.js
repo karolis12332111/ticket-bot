@@ -10,6 +10,7 @@ function isBotOwner(userId) {
   return OWNER_IDS.includes(String(userId));
 }
 
+// ===== WEB SERVER (Render/UptimeRobot) =====
 const express = require("express");
 const app = express();
 
@@ -17,8 +18,9 @@ app.get("/", (req, res) => res.send("OK"));
 app.get("/health", (req, res) => res.send("HEALTHY"));
 
 const PORT = process.env.PORT || 3000;
-app.listen(PORT, () => console.log("Web serveris veikia ant porto " + PORT));
+app.listen(PORT, "0.0.0.0", () => console.log("Web serveris veikia ant porto " + PORT));
 
+// ===== DISCORD =====
 const {
   Client,
   GatewayIntentBits,
@@ -34,8 +36,6 @@ const {
   TextInputStyle,
   AttachmentBuilder,
 } = require("discord.js");
-
-const EPHEMERAL_FLAGS = 64;
 
 // ===== REQUIRED ENV =====
 const REQUIRED = ["DISCORD_TOKEN", "GUILD_ID", "STAFF_ROLE_ID", "LOG_CHANNEL_ID", "OWNER_IDS"];
@@ -102,14 +102,13 @@ const TICKET_TYPES = {
   },
 };
 
-// optional guard
 const ONE_ACTIVE_TICKET_PER_TYPE = true;
 
 const client = new Client({
   intents: [GatewayIntentBits.Guilds, GatewayIntentBits.GuildMessages],
 });
 
-client.once("ready", () => console.log(`✅ Logged in as ${client.user.tag}`));
+client.once("ready", () => console.log(`✅ Logged in as ${client.user.tag} (${client.user.id})`));
 
 async function fetchMe(guild) {
   return guild.members.me ?? (await guild.members.fetchMe());
@@ -257,7 +256,6 @@ async function createTicketChannel({ guild, user, type, answers }) {
     topic: setTopic({ ownerId: user.id, type }),
   });
 
-  // perms: opener can view/send. staff role can view/send. bot can manage.
   await channel.permissionOverwrites.set([
     { id: guild.roles.everyone.id, deny: [PermissionsBitField.Flags.ViewChannel] },
     {
@@ -297,14 +295,14 @@ async function createTicketChannel({ guild, user, type, answers }) {
   });
 
   const logCh = guild.channels.cache.get(logId);
-  if (logCh) logCh.send(`🎫 Created **${type}** ticket: ${channel} | owner: <@${user.id}>`);
+  if (logCh) logCh.send(`🎫 Created **${type}** ticket: ${channel} | owner: <@${user.id}>`).catch(() => {});
 
   return { already: false, channel };
 }
 
 function ensureBotOwner(interaction) {
   if (isBotOwner(interaction.user.id)) return true;
-  interaction.reply({ content: "❌ Not allowed (owners only).", flags: EPHEMERAL_FLAGS }).catch(() => {});
+  interaction.reply({ content: "❌ Not allowed (owners only).", ephemeral: true }).catch(() => {});
   return false;
 }
 
@@ -335,7 +333,7 @@ client.on("interactionCreate", async (interaction) => {
     if (interaction.isStringSelectMenu() && interaction.customId === "ticket_type") {
       const type = interaction.values[0];
       const cfg = TICKET_TYPES[type];
-      if (!cfg) return interaction.reply({ content: "Unknown ticket type.", flags: EPHEMERAL_FLAGS });
+      if (!cfg) return interaction.reply({ content: "Unknown ticket type.", ephemeral: true });
 
       const modal = new ModalBuilder().setCustomId(`ticket_modal_${type}`).setTitle(cfg.modalTitle);
 
@@ -359,11 +357,14 @@ client.on("interactionCreate", async (interaction) => {
     // Modal submit -> create ticket
     if (interaction.isModalSubmit() && interaction.customId.startsWith("ticket_modal_")) {
       const guild = interaction.guild;
-      if (!guild) return interaction.reply({ content: "This only works in a server.", flags: EPHEMERAL_FLAGS });
+      if (!guild) return interaction.reply({ content: "This only works in a server.", ephemeral: true });
+
+      // svarbu: kad nepamestų interactiono
+      await interaction.deferReply({ ephemeral: true });
 
       const type = interaction.customId.replace("ticket_modal_", "");
       const cfg = TICKET_TYPES[type];
-      if (!cfg) return interaction.reply({ content: "Unknown ticket type.", flags: EPHEMERAL_FLAGS });
+      if (!cfg) return interaction.editReply({ content: "Unknown ticket type." });
 
       const answers = cfg.questions.slice(0, 5).map((q) => ({
         label: q.label,
@@ -373,76 +374,30 @@ client.on("interactionCreate", async (interaction) => {
       const res = await createTicketChannel({ guild, user: interaction.user, type, answers });
 
       if (res.already) {
-        return interaction.reply({
+        return interaction.editReply({
           content: `⚠️ You already have an active **${type}** ticket: ${res.channel}`,
-          flags: EPHEMERAL_FLAGS,
         });
       }
 
-      return interaction.reply({ content: `✅ Ticket created: ${res.channel}`, flags: EPHEMERAL_FLAGS });
+      return interaction.editReply({ content: `✅ Ticket created: ${res.channel}` });
     }
 
-    // Buttons (ONLY owners can use ANY ticket buttons)
+    // Buttons (ONLY owners)
     if (interaction.isButton()) {
       if (!ensureBotOwner(interaction)) return;
 
       const channel = interaction.channel;
       if (!channel || channel.type !== ChannelType.GuildText) {
-        return interaction.reply({ content: "Not a ticket channel.", flags: EPHEMERAL_FLAGS });
+        return interaction.reply({ content: "Not a ticket channel.", ephemeral: true }).catch(() => {});
       }
 
       const ticketOwnerId = getOwnerIdFromTopic(channel.topic);
       const type = getTypeFromTopic(channel.topic);
       if (!ticketOwnerId || !type) {
-        return interaction.reply({ content: "This channel is not recognized as a ticket.", flags: EPHEMERAL_FLAGS });
+        return interaction.reply({ content: "This channel is not recognized as a ticket.", ephemeral: true }).catch(() => {});
       }
 
-      // Claim toggle
-      if (interaction.customId === "ticket_claim_toggle") {
-        const currentClaim = getClaimFromTopic(channel.topic);
-        const newClaim = currentClaim ? null : interaction.user.id;
-
-        await channel.setTopic(setTopic({ ownerId: ticketOwnerId, type, claimedId: newClaim }));
-
-        const msgs = await channel.messages.fetch({ limit: 50 });
-        const firstBotMsg = msgs.find((m) => m.author?.id === client.user.id && m.components?.length);
-        if (firstBotMsg) {
-          await firstBotMsg.edit({ components: [ticketButtonsRow1({ claimedId: newClaim }), ticketButtonsRow2()] }).catch(() => {});
-        }
-
-        return interaction.reply({
-          content: newClaim ? `✅ Claimed by <@${newClaim}>` : `✅ Ticket unclaimed`,
-          flags: EPHEMERAL_FLAGS,
-        });
-      }
-
-      // Transcript
-      if (interaction.customId === "ticket_transcript") {
-        await interaction.reply({ content: "⏳ Generating transcript...", flags: EPHEMERAL_FLAGS });
-
-        let transcriptText = "";
-        try {
-          transcriptText = await fetchTranscriptText(channel, 200);
-        } catch (e) {
-          transcriptText = `Transcript failed: ${e?.message || e}`;
-        }
-
-        const fileName = `transcript-${channel.name}.txt`;
-        const attachment = new AttachmentBuilder(Buffer.from(transcriptText, "utf-8"), { name: fileName });
-
-        const logCh = interaction.guild.channels.cache.get(String(process.env.LOG_CHANNEL_ID).trim());
-        if (logCh) {
-          await logCh.send({ content: `📄 Transcript exported: ${channel} (by <@${interaction.user.id}>)`, files: [attachment] }).catch(() => {});
-        }
-
-        return interaction.followUp({
-          content: "✅ Transcript generated (saved in logs too).",
-          files: [attachment],
-          flags: EPHEMERAL_FLAGS,
-        });
-      }
-
-      // Add user (shows modal)
+      // BUTTONS THAT SHOW MODAL: do NOT deferReply before showModal
       if (interaction.customId === "ticket_adduser") {
         const modal = new ModalBuilder().setCustomId("ticket_adduser_modal").setTitle("Add user to ticket");
         modal.addComponents(
@@ -458,7 +413,6 @@ client.on("interactionCreate", async (interaction) => {
         return interaction.showModal(modal);
       }
 
-      // Rename (shows modal)
       if (interaction.customId === "ticket_rename") {
         const modal = new ModalBuilder().setCustomId("ticket_rename_modal").setTitle("Rename ticket");
         modal.addComponents(
@@ -475,26 +429,65 @@ client.on("interactionCreate", async (interaction) => {
         return interaction.showModal(modal);
       }
 
-      // Close (confirm)
+      // For all other buttons, we defer (prevents timeout)
+      await interaction.deferReply({ ephemeral: true });
+
+      if (interaction.customId === "ticket_claim_toggle") {
+        const currentClaim = getClaimFromTopic(channel.topic);
+        const newClaim = currentClaim ? null : interaction.user.id;
+
+        await channel.setTopic(setTopic({ ownerId: ticketOwnerId, type, claimedId: newClaim }));
+
+        const msgs = await channel.messages.fetch({ limit: 50 });
+        const firstBotMsg = msgs.find((m) => m.author?.id === client.user.id && m.components?.length);
+        if (firstBotMsg) {
+          await firstBotMsg.edit({ components: [ticketButtonsRow1({ claimedId: newClaim }), ticketButtonsRow2()] }).catch(() => {});
+        }
+
+        return interaction.editReply({
+          content: newClaim ? `✅ Claimed by <@${newClaim}>` : `✅ Ticket unclaimed`,
+        });
+      }
+
+      if (interaction.customId === "ticket_transcript") {
+        await interaction.editReply({ content: "⏳ Generating transcript..." });
+
+        let transcriptText = "";
+        try {
+          transcriptText = await fetchTranscriptText(channel, 200);
+        } catch (e) {
+          transcriptText = `Transcript failed: ${e?.message || e}`;
+        }
+
+        const fileName = `transcript-${channel.name}.txt`;
+        const attachment = new AttachmentBuilder(Buffer.from(transcriptText, "utf-8"), { name: fileName });
+
+        const logCh = interaction.guild.channels.cache.get(String(process.env.LOG_CHANNEL_ID).trim());
+        if (logCh) {
+          await logCh.send({ content: `📄 Transcript exported: ${channel} (by <@${interaction.user.id}>)`, files: [attachment] }).catch(() => {});
+        }
+
+        return interaction.editReply({ content: "✅ Transcript generated (saved in logs too).", files: [attachment] });
+      }
+
       if (interaction.customId === "ticket_close") {
         const row = new ActionRowBuilder().addComponents(
           new ButtonBuilder().setCustomId("ticket_close_confirm").setLabel("Confirm Close").setStyle(ButtonStyle.Danger),
           new ButtonBuilder().setCustomId("ticket_close_cancel").setLabel("Cancel").setStyle(ButtonStyle.Secondary)
         );
 
-        return interaction.reply({
+        return interaction.editReply({
           content: "Are you sure you want to close this ticket?",
           components: [row],
-          flags: EPHEMERAL_FLAGS,
         });
       }
 
       if (interaction.customId === "ticket_close_cancel") {
-        return interaction.reply({ content: "✅ Close cancelled.", flags: EPHEMERAL_FLAGS });
+        return interaction.editReply({ content: "✅ Close cancelled.", components: [] });
       }
 
       if (interaction.customId === "ticket_close_confirm") {
-        await interaction.reply({ content: "🔒 Closing in 5 seconds… generating transcript & sending DM.", flags: EPHEMERAL_FLAGS });
+        await interaction.editReply({ content: "🔒 Closing in 5 seconds… generating transcript & sending DM.", components: [] });
 
         let transcriptText = "";
         try {
@@ -530,15 +523,19 @@ client.on("interactionCreate", async (interaction) => {
         setTimeout(() => channel.delete().catch(() => {}), 5000);
         return;
       }
+
+      return interaction.editReply({ content: "Unknown button.", components: [] });
     }
 
     // Modals (ONLY owners)
     if (interaction.isModalSubmit() && interaction.customId === "ticket_adduser_modal") {
       if (!ensureBotOwner(interaction)) return;
 
+      await interaction.deferReply({ ephemeral: true });
+
       const channel = interaction.channel;
       if (!channel || channel.type !== ChannelType.GuildText) {
-        return interaction.reply({ content: "Not a ticket channel.", flags: EPHEMERAL_FLAGS });
+        return interaction.editReply({ content: "Not a ticket channel." });
       }
 
       const raw = interaction.fields.getTextInputValue("user");
@@ -550,7 +547,7 @@ client.on("interactionCreate", async (interaction) => {
       } catch {}
 
       if (!member) {
-        return interaction.reply({ content: "❌ Could not find that user ID.", flags: EPHEMERAL_FLAGS });
+        return interaction.editReply({ content: "❌ Could not find that user ID." });
       }
 
       await channel.permissionOverwrites.edit(member.id, {
@@ -559,15 +556,17 @@ client.on("interactionCreate", async (interaction) => {
         ReadMessageHistory: true,
       });
 
-      return interaction.reply({ content: `✅ Added <@${member.id}> to this ticket.`, flags: EPHEMERAL_FLAGS });
+      return interaction.editReply({ content: `✅ Added <@${member.id}> to this ticket.` });
     }
 
     if (interaction.isModalSubmit() && interaction.customId === "ticket_rename_modal") {
       if (!ensureBotOwner(interaction)) return;
 
+      await interaction.deferReply({ ephemeral: true });
+
       const channel = interaction.channel;
       if (!channel || channel.type !== ChannelType.GuildText) {
-        return interaction.reply({ content: "Not a ticket channel.", flags: EPHEMERAL_FLAGS });
+        return interaction.editReply({ content: "Not a ticket channel." });
       }
 
       const name = interaction.fields
@@ -579,16 +578,17 @@ client.on("interactionCreate", async (interaction) => {
         .slice(0, 90);
 
       if (!name || name.length < 2) {
-        return interaction.reply({ content: "❌ Invalid name.", flags: EPHEMERAL_FLAGS });
+        return interaction.editReply({ content: "❌ Invalid name." });
       }
 
       await channel.setName(name).catch(() => {});
-      return interaction.reply({ content: `✅ Renamed ticket to **#${name}**`, flags: EPHEMERAL_FLAGS });
+      return interaction.editReply({ content: `✅ Renamed ticket to **#${name}**` });
     }
   } catch (e) {
     console.error("❌ Runtime error:", e);
-    if (interaction.isRepliable()) {
-      interaction.reply({ content: "An error occurred. Check the terminal.", flags: EPHEMERAL_FLAGS }).catch(() => {});
+    // jei dar neatsakyta - bandom atsakyti
+    if (interaction?.isRepliable?.()) {
+      interaction.reply({ content: "❌ Error (check Render logs).", ephemeral: true }).catch(() => {});
     }
   }
 });
